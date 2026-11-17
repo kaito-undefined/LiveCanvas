@@ -8,6 +8,7 @@ Usage:    python src/python/main.py [input_deck.pptx output_ast.json]
 
 import sys
 import json
+import math
 import base64
 import colorsys
 from pathlib import Path
@@ -84,6 +85,7 @@ class ThemeAndCascadeResolver:
         }
         self.major_font = "Calibri"
         self.minor_font = "Calibri"
+        self.bg_fill_styles: list[str] = []
         self._parse_master_and_theme(prs)
 
     def _parse_master_and_theme(self, prs: Presentation):
@@ -121,9 +123,41 @@ class ThemeAndCascadeResolver:
                             self.major_font = mj_latin.get("typeface")
                         if mn_latin is not None and mn_latin.get("typeface"):
                             self.minor_font = mn_latin.get("typeface")
+
+                    bg_fill_lst = theme_xml.find(".//a:fmtScheme/a:bgFillStyleLst", NS)
+                    if bg_fill_lst is not None:
+                        for fill_elem in bg_fill_lst:
+                            tag = etree.QName(fill_elem).localname
+                            if tag == "solidFill":
+                                clr = self.resolve_color_element(fill_elem)
+                                self.bg_fill_styles.append(clr or "#FFFFFF")
+                            elif tag == "gradFill":
+                                stops = fill_elem.findall("a:gsLst/a:gs", NS)
+                                if stops:
+                                    first_clr = self.resolve_color_element(stops[0]) or "#FFFFFF"
+                                    last_clr = self.resolve_color_element(stops[-1]) or first_clr
+                                    self.bg_fill_styles.append(f"linear-gradient(135deg, {first_clr}, {last_clr})")
+                                else:
+                                    self.bg_fill_styles.append("#FFFFFF")
+                            else:
+                                self.bg_fill_styles.append("#FFFFFF")
                     break
         except Exception:
             pass
+
+    def resolve_bg_ref(self, bg_ref) -> str | None:
+        if bg_ref is None:
+            return None
+        idx_str = bg_ref.get("idx", "0")
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            idx = 0
+        if idx >= 1001:
+            style_idx = idx - 1001
+            if 0 <= style_idx < len(self.bg_fill_styles):
+                return self.bg_fill_styles[style_idx]
+        return self.resolve_color_element(bg_ref)
 
     def resolve_font_family(self, typeface: str | None) -> str:
         if not typeface:
@@ -274,11 +308,52 @@ class PresentationMLCompiler:
                     clr = self.theme.resolve_color_element(solid)
                     if clr:
                         return clr
+                grad = bg_pr.find("a:gradFill", NS)
+                if grad is not None:
+                    stops = grad.findall("a:gsLst/a:gs", NS)
+                    if stops:
+                        first_clr = self.theme.resolve_color_element(stops[0]) or "#FFFFFF"
+                        last_clr = self.theme.resolve_color_element(stops[-1]) or first_clr
+                        return f"linear-gradient(135deg, {first_clr}, {last_clr})"
             bg_ref = container.element.find(".//p:bg/p:bgRef", NS)
             if bg_ref is not None:
-                clr = self.theme.resolve_color_element(bg_ref)
+                clr = self.theme.resolve_bg_ref(bg_ref)
                 if clr:
                     return clr
+
+        # Full-bleed arka plan şekli kontrolü (örn. (0,0) konumunda tüm slaytı kaplayan şekil)
+        if len(slide.shapes) > 0:
+            first_sp = slide.shapes[0]
+            try:
+                xfrm = first_sp.element.find(".//p:spPr/a:xfrm", NS)
+                if xfrm is not None:
+                    off = xfrm.find("a:off", NS)
+                    ext = xfrm.find("a:ext", NS)
+                    if off is not None and ext is not None:
+                        x = int(off.get("x", 0))
+                        y = int(off.get("y", 0))
+                        w = int(ext.get("cx", 0))
+                        h = int(ext.get("cy", 0))
+                        slide_w_emu = int(self.prs.slide_width)
+                        slide_h_emu = int(self.prs.slide_height)
+                        if x == 0 and y == 0 and w >= int(slide_w_emu * 0.95) and h >= int(slide_h_emu * 0.95):
+                            sp_pr = first_sp.element.find("p:spPr", NS)
+                            if sp_pr is not None:
+                                solid = sp_pr.find("a:solidFill", NS)
+                                if solid is not None:
+                                    clr = self.theme.resolve_color_element(solid)
+                                    if clr:
+                                        return clr
+                                grad = sp_pr.find("a:gradFill", NS)
+                                if grad is not None:
+                                    stops = grad.findall("a:gsLst/a:gs", NS)
+                                    if stops:
+                                        first_clr = self.theme.resolve_color_element(stops[0]) or "#FFFFFF"
+                                        last_clr = self.theme.resolve_color_element(stops[-1]) or first_clr
+                                        return f"linear-gradient(135deg, {first_clr}, {last_clr})"
+            except Exception:
+                pass
+
         return "#" + self.theme.theme_colors.get("lt1", "FFFFFF")
 
     def _process_shape(self, shape, slide, nodes: list, edges: list,
@@ -415,9 +490,10 @@ class PresentationMLCompiler:
         sp_pr = sp_elem.find("p:spPr", NS)
         sp_style = sp_elem.find("p:style", NS)
 
-        # Şekil Geometrisi (rect, roundRect, ellipse, diamond vb.)
+        # Şekil Geometrisi (rect, roundRect, ellipse, diamond, arc vb.)
         prst_geom = "rect"
         corner_radius_px = 0.0
+        arc_params = None
         if sp_pr is not None:
             prst_elem = sp_pr.find("a:prstGeom", NS)
             if prst_elem is not None:
@@ -430,6 +506,23 @@ class PresentationMLCompiler:
                         if len(parts) == 2 and parts[0] == "val":
                             adj_val = float(parts[1])
                     corner_radius_px = round(min(geom["width"], geom["height"]) * (adj_val / 100000.0), 2)
+                elif prst_geom == "arc":
+                    adj1_val = 16200000.0
+                    adj2_val = 0.0
+                    gd1 = prst_elem.find("a:avLst/a:gd[@name='adj1']", NS)
+                    gd2 = prst_elem.find("a:avLst/a:gd[@name='adj2']", NS)
+                    if gd1 is not None and "fmla" in gd1.attrib:
+                        parts = gd1.get("fmla").split()
+                        if len(parts) == 2 and parts[0] == "val":
+                            adj1_val = float(parts[1])
+                    if gd2 is not None and "fmla" in gd2.attrib:
+                        parts = gd2.get("fmla").split()
+                        if len(parts) == 2 and parts[0] == "val":
+                            adj2_val = float(parts[1])
+                    arc_params = {
+                        "startAngle": round(adj1_val / 60000.0, 2),
+                        "endAngle": round(adj2_val / 60000.0, 2),
+                    }
 
         # Arka Plan Dolgusu (Fill)
         bg_color = "transparent"
@@ -457,6 +550,8 @@ class PresentationMLCompiler:
         border_color = "transparent"
         border_width = 0.0
         border_style = "solid"
+        arrow_start = "none"
+        arrow_end = "none"
         ln_elem = sp_pr.find("a:ln", NS) if sp_pr is not None else None
 
         if ln_elem is not None and ln_elem.find("a:noFill", NS) is None:
@@ -472,6 +567,13 @@ class PresentationMLCompiler:
                     border_style = "dotted"
                 elif "dash" in d_val.lower():
                     border_style = "dashed"
+
+            head_end = ln_elem.find("a:headEnd", NS)
+            tail_end = ln_elem.find("a:tailEnd", NS)
+            if head_end is not None and head_end.get("type", "none") != "none":
+                arrow_start = head_end.get("type")
+            if tail_end is not None and tail_end.get("type", "none") != "none":
+                arrow_end = tail_end.get("type")
         elif (ln_elem is None or ln_elem.find("a:noFill", NS) is None) and sp_style is not None:
             ln_ref = sp_style.find("a:lnRef", NS)
             if ln_ref is not None and ln_ref.get("idx", "0") != "0":
@@ -479,6 +581,22 @@ class PresentationMLCompiler:
                 if resolved:
                     border_color = resolved
                     border_width = 1.0
+
+        # Gölge Çıkarımı (a:outerShdw in a:effectLst)
+        box_shadow = None
+        if sp_pr is not None:
+            outer_shdw = sp_pr.find("a:effectLst/a:outerShdw", NS)
+            if outer_shdw is not None:
+                blur_emu = float(outer_shdw.get("blurRad", 0))
+                dist_emu = float(outer_shdw.get("dist", 0))
+                dir_rot = float(outer_shdw.get("dir", 0))
+                blur_px = emu_to_px(blur_emu)
+                dist_px = emu_to_px(dist_emu)
+                dir_deg = rot_to_deg(dir_rot)
+                dx = round(dist_px * math.cos(math.radians(dir_deg)), 2)
+                dy = round(dist_px * math.sin(math.radians(dir_deg)), 2)
+                clr = self.theme.resolve_color_element(outer_shdw) or "rgba(0, 0, 0, 0.35)"
+                box_shadow = f"{dx}px {dy}px {blur_px}px {clr}"
 
         # Text Body & Padding (Insets)
         padding = {"top": 4.8, "right": 9.6, "bottom": 4.8, "left": 9.6}
@@ -510,40 +628,90 @@ class PresentationMLCompiler:
 
             paragraphs = self._extract_paragraphs(shape, slide, sp_style)
 
-        return {
+        if prst_geom in ("line", "arc") or arc_params is not None or geom["width"] <= 1.5 or geom["height"] <= 1.5:
+            if not paragraphs or all(not p.get("runs") or all(not r.get("text", "").strip() for r in p["runs"]) for p in paragraphs):
+                padding = {"top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0}
+
+        style_dict = {
+            "background": bg_color,
+            "borderColor": border_color,
+            "borderWidth": border_width,
+            "borderStyle": border_style,
+            "borderRadius": corner_radius_px,
+            "verticalAlign": vertical_align,
+            "wordWrap": word_wrap,
+            "padding": padding,
+        }
+        if box_shadow:
+            style_dict["boxShadow"] = box_shadow
+        if arrow_start != "none":
+            style_dict["arrowStart"] = arrow_start
+        if arrow_end != "none":
+            style_dict["arrowEnd"] = arrow_end
+
+        node_dict = {
             "id": str(shape.shape_id),
             "name": shape.name or f"shape-{shape.shape_id}",
             "type": "shapeNode",
             "zIndex": z_index,
             "shapePreset": prst_geom,
             "geometry": geom,
-            "style": {
-                "background": bg_color,
-                "borderColor": border_color,
-                "borderWidth": border_width,
-                "borderStyle": border_style,
-                "borderRadius": corner_radius_px,
-                "verticalAlign": vertical_align,
-                "wordWrap": word_wrap,
-                "padding": padding,
-            },
+            "style": style_dict,
             "textBody": paragraphs,
             "ports": self._default_ports(),
         }
+        if arrow_start != "none":
+            node_dict["arrowStart"] = arrow_start
+        if arrow_end != "none":
+            node_dict["arrowEnd"] = arrow_end
+        if arc_params is not None:
+            node_dict["arcParams"] = arc_params
+
+        return node_dict
 
     def _extract_paragraphs(self, shape, slide, sp_style) -> list:
         paragraphs_out = []
         if not shape.has_text_frame:
             return paragraphs_out
 
-        # Varsayılan metin rengi (Shape Style fontRef veya dk1)
+        # Varsayılan metin rengi ve font ailesi
         default_font_color = "#" + self.theme.theme_colors.get("dk1", "000000")
+        default_font_family = self.theme.minor_font
+
+        # 1. Shape Style fontRef kontrolü
         if sp_style is not None:
             font_ref = sp_style.find("a:fontRef", NS)
             if font_ref is not None:
                 resolved = self.theme.resolve_color_element(font_ref)
                 if resolved:
                     default_font_color = resolved
+                idx = font_ref.get("idx", "")
+                if idx in ("major", "+mj", "+mj-lt"):
+                    default_font_family = self.theme.major_font
+                elif idx in ("minor", "+mn", "+mn-lt"):
+                    default_font_family = self.theme.minor_font
+
+        # 2. Placeholder tipi kontrolü (title -> major_font, body -> minor_font)
+        if shape.is_placeholder:
+            ph = shape.element.find(".//p:nvPr/p:ph", NS)
+            ph_type = ph.get("type", "body") if ph is not None else "body"
+            if ph_type in ("title", "ctrTitle"):
+                default_font_family = self.theme.major_font
+            elif ph_type in ("body", "subTitle"):
+                default_font_family = self.theme.minor_font
+
+        # 3. Shape txBody list style varsayılanı (lstStyle/lvl1pPr/defRPr)
+        lst_def_rpr = shape.element.find(".//p:txBody/a:lstStyle/a:lvl1pPr/a:defRPr", NS)
+        if lst_def_rpr is not None:
+            latin = lst_def_rpr.find("a:latin", NS)
+            ea = lst_def_rpr.find("a:ea", NS)
+            cs = lst_def_rpr.find("a:cs", NS)
+            if latin is not None and "typeface" in latin.attrib:
+                default_font_family = self.theme.resolve_font_family(latin.get("typeface"))
+            elif ea is not None and "typeface" in ea.attrib:
+                default_font_family = self.theme.resolve_font_family(ea.get("typeface"))
+            elif cs is not None and "typeface" in cs.attrib:
+                default_font_family = self.theme.resolve_font_family(cs.get("typeface"))
 
         default_pt = self._resolve_default_font_pt(shape)
 
@@ -585,22 +753,23 @@ class PresentationMLCompiler:
                     r_pr = child.find("a:rPr", NS)
                     t_elem = child.find("a:t", NS)
                     text_val = t_elem.text if (t_elem is not None and t_elem.text) else ""
-                    runs_out.append(self._parse_run(text_val, r_pr, p_pr, default_pt, default_font_color))
+                    runs_out.append(self._parse_run(text_val, r_pr, p_pr, default_pt, default_font_color, default_font_family))
                 elif tag == "br":
                     runs_out.append({
                         "text": "\n",
-                        "fontFamily": self.theme.minor_font,
+                        "fontFamily": default_font_family,
                         "fontSize": round(default_pt * (96.0 / 72.0), 2),
                         "color": default_font_color,
                         "bold": False,
                         "italic": False,
                         "underline": False,
+                        "strikethrough": False,
                     })
                 elif tag == "fld":
                     r_pr = child.find("a:rPr", NS)
                     t_elem = child.find("a:t", NS)
                     text_val = t_elem.text if (t_elem is not None and t_elem.text) else ""
-                    runs_out.append(self._parse_run(text_val, r_pr, p_pr, default_pt, default_font_color))
+                    runs_out.append(self._parse_run(text_val, r_pr, p_pr, default_pt, default_font_color, default_font_family))
 
             paragraphs_out.append({
                 "align": align,
@@ -624,13 +793,15 @@ class PresentationMLCompiler:
             return 20.0
         return 18.0
 
-    def _parse_run(self, text: str, r_pr, p_pr, default_pt: float, default_color: str) -> dict:
-        font_family = self.theme.minor_font
+    def _parse_run(self, text: str, r_pr, p_pr, default_pt: float, default_color: str,
+                   default_font_family: str = None) -> dict:
+        font_family = default_font_family or self.theme.minor_font
         font_pt = default_pt
         color = default_color
         bold = False
         italic = False
         underline = False
+        strikethrough = False
 
         # Paragraf varsayılan run özellikleri (defRPr)
         def_rpr = p_pr.find("a:defRPr", NS) if p_pr is not None else None
@@ -645,10 +816,21 @@ class PresentationMLCompiler:
                 italic = prop_node.get("i") in ("1", "true")
             if "u" in prop_node.attrib and prop_node.get("u") != "none":
                 underline = True
+            strike_attr = prop_node.get("strike")
+            if strike_attr in ("sngStrike", "dblStrike"):
+                strikethrough = True
+            elif strike_attr == "noStrike":
+                strikethrough = False
 
             latin = prop_node.find("a:latin", NS)
+            ea = prop_node.find("a:ea", NS)
+            cs = prop_node.find("a:cs", NS)
             if latin is not None and "typeface" in latin.attrib:
                 font_family = self.theme.resolve_font_family(latin.get("typeface"))
+            elif ea is not None and "typeface" in ea.attrib:
+                font_family = self.theme.resolve_font_family(ea.get("typeface"))
+            elif cs is not None and "typeface" in cs.attrib:
+                font_family = self.theme.resolve_font_family(cs.get("typeface"))
 
             solid_fill = prop_node.find("a:solidFill", NS)
             if solid_fill is not None:
@@ -664,6 +846,7 @@ class PresentationMLCompiler:
             "bold": bold,
             "italic": italic,
             "underline": underline,
+            "strikethrough": strikethrough,
         }
 
     def _compile_picture(self, shape, slide, parent_x: float, parent_y: float,
@@ -713,9 +896,43 @@ class PresentationMLCompiler:
                         cell_bg = self.theme.resolve_color_element(solid) or "#FFFFFF"
 
                 cell_text = cell.text_frame.text if cell.text_frame else ""
+                cell_font_family = self.theme.minor_font
+                cell_font_size = 13.0
+                cell_color = "#000000"
+                cell_bold = False
+
+                if cell.text_frame and cell.text_frame.paragraphs:
+                    p0 = cell.text_frame.paragraphs[0]
+                    if p0.runs:
+                        r0 = p0.runs[0]
+                        r_pr = r0._r.find("a:rPr", NS) if hasattr(r0, "_r") else None
+                        if r_pr is not None:
+                            latin = r_pr.find("a:latin", NS)
+                            ea = r_pr.find("a:ea", NS)
+                            cs = r_pr.find("a:cs", NS)
+                            if latin is not None and "typeface" in latin.attrib:
+                                cell_font_family = self.theme.resolve_font_family(latin.get("typeface"))
+                            elif ea is not None and "typeface" in ea.attrib:
+                                cell_font_family = self.theme.resolve_font_family(ea.get("typeface"))
+                            elif cs is not None and "typeface" in cs.attrib:
+                                cell_font_family = self.theme.resolve_font_family(cs.get("typeface"))
+                            if "sz" in r_pr.attrib:
+                                cell_font_size = round((float(r_pr.get("sz")) / 100.0) * (96.0 / 72.0), 2)
+                            if "b" in r_pr.attrib:
+                                cell_bold = r_pr.get("b") in ("1", "true")
+                            solid = r_pr.find("a:solidFill", NS)
+                            if solid is not None:
+                                c = self.theme.resolve_color_element(solid)
+                                if c:
+                                    cell_color = c
+
                 cells_data.append({
                     "text": cell_text,
                     "backgroundColor": cell_bg,
+                    "fontFamily": cell_font_family,
+                    "fontSize": cell_font_size,
+                    "color": cell_color,
+                    "bold": cell_bold,
                 })
             rows_data.append({
                 "height": row_height,

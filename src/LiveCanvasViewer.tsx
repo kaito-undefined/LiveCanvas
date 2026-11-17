@@ -27,6 +27,28 @@ const PORT_POSITIONS: Record<number, Position> = {
   3: Position.Right,
 };
 
+const MONOSPACE_FONTS = new Set([
+  "aptos mono",
+  "cascadia mono",
+  "cascadia code",
+  "consolas",
+  "courier new",
+  "fira code",
+  "menlo",
+  "monaco",
+  "source code pro",
+  "monospace",
+]);
+
+function getFontFamilyFallback(fontFamily?: string, defaultFont?: string): string {
+  const font = fontFamily || defaultFont || "sans-serif";
+  const lower = font.toLowerCase();
+  if (MONOSPACE_FONTS.has(lower) || lower.includes("mono")) {
+    return `"${font}", monospace`;
+  }
+  return `"${font}", "Segoe UI", system-ui, -apple-system, sans-serif`;
+}
+
 function getShapePolygon(shapePreset: string | undefined): string | null {
   switch (shapePreset) {
     case "triangle":
@@ -97,9 +119,33 @@ export const ShapeNode = memo(({ data }: NodeProps<Node<CanvasNodeAST>>) => {
   const { geometry, style, textBody, shapePreset } = data;
   if (!style) return null;
 
+  const isLine = shapePreset === "line";
+  const isArc = shapePreset === "arc";
   const isEllipse = shapePreset === "ellipse";
   const polygon = getShapePolygon(shapePreset);
-  const isVectorShape = Boolean(polygon);
+  const isVectorShape = Boolean(polygon) || isLine || isArc;
+
+  const arrowStart = (data.arrowStart as string | undefined) || style.arrowStart;
+  const arrowEnd = (data.arrowEnd as string | undefined) || style.arrowEnd;
+  const hasArrowStart = arrowStart && arrowStart !== "none";
+  const hasArrowEnd = arrowEnd && arrowEnd !== "none";
+
+  const strokeColor =
+    style.borderColor && style.borderColor !== "transparent"
+      ? style.borderColor
+      : style.background && style.background !== "transparent"
+      ? style.background
+      : "#000000";
+  const strokeWidth = Math.max(style.borderWidth || (isLine ? 1.5 : 2), 1);
+  const strokeDasharray =
+    style.borderStyle === "dashed"
+      ? "6 4"
+      : style.borderStyle === "dotted"
+      ? "3 3"
+      : undefined;
+
+  const fullText = textBody ? textBody.map((p) => p.runs.map((r) => r.text).join("")).join("").trim() : "";
+  const isSingleWord = fullText.length > 0 && !fullText.includes(" ") && !fullText.includes("\n");
 
   const justifyContentMap: Record<string, string> = {
     top: "flex-start",
@@ -122,23 +168,24 @@ export const ShapeNode = memo(({ data }: NodeProps<Node<CanvasNodeAST>>) => {
         borderWidth: isVectorShape ? 0 : `${style.borderWidth}px`,
         borderStyle: style.borderStyle,
         borderRadius: isEllipse ? "50%" : `${style.borderRadius}px`,
-        paddingTop: `${style.padding.top}px`,
-        paddingRight: `${style.padding.right}px`,
-        paddingBottom: `${style.padding.bottom}px`,
-        paddingLeft: `${style.padding.left}px`,
+        boxShadow: isVectorShape ? undefined : style.boxShadow,
+        paddingTop: isLine || isArc ? 0 : `${style.padding.top}px`,
+        paddingRight: isLine || isArc ? 0 : `${style.padding.right}px`,
+        paddingBottom: isLine || isArc ? 0 : `${style.padding.bottom}px`,
+        paddingLeft: isLine || isArc ? 0 : `${style.padding.left}px`,
         display: "flex",
         flexDirection: "column",
         justifyContent: justifyContentMap[style.verticalAlign] || "flex-start",
         boxSizing: "border-box",
         position: "relative",
-        whiteSpace: style.wordWrap ? "pre-wrap" : "pre",
-        wordBreak: "break-word",
+        whiteSpace: isSingleWord ? "nowrap" : (style.wordWrap ? "pre-wrap" : "pre"),
+        wordBreak: isSingleWord ? "normal" : "break-word",
         userSelect: "text",
       }}
     >
       <BidirectionalPorts />
 
-      {/* SVG arka planı, dikdörtgen olmayan şekillerin semantiğini korur. */}
+      {/* SVG Poligon Arka Planı */}
       {polygon && (
         <svg
           viewBox="0 0 100 100"
@@ -150,6 +197,7 @@ export const ShapeNode = memo(({ data }: NodeProps<Node<CanvasNodeAST>>) => {
             height: "100%",
             zIndex: 0,
             pointerEvents: "none",
+            filter: style.boxShadow ? `drop-shadow(${style.boxShadow})` : undefined,
           }}
         >
           <polygon
@@ -161,11 +209,92 @@ export const ShapeNode = memo(({ data }: NodeProps<Node<CanvasNodeAST>>) => {
         </svg>
       )}
 
+      {/* SVG Çizgi ve Oklar */}
+      {isLine && (
+        <svg
+          width="100%"
+          height="100%"
+          style={{
+            position: "absolute",
+            inset: 0,
+            overflow: "visible",
+            pointerEvents: "none",
+            filter: style.boxShadow ? `drop-shadow(${style.boxShadow})` : undefined,
+          }}
+        >
+          <defs>
+            {hasArrowEnd && (
+              <marker
+                id={`arrow-end-${data.id}`}
+                markerWidth="8"
+                markerHeight="8"
+                refX="6"
+                refY="3"
+                orient="auto"
+              >
+                <polygon points="0 0, 7 3, 0 6" fill={strokeColor} />
+              </marker>
+            )}
+            {hasArrowStart && (
+              <marker
+                id={`arrow-start-${data.id}`}
+                markerWidth="8"
+                markerHeight="8"
+                refX="1"
+                refY="3"
+                orient="auto-start-reverse"
+              >
+                <polygon points="7 0, 0 3, 7 6" fill={strokeColor} />
+              </marker>
+            )}
+          </defs>
+          <line
+            x1={geometry.width <= 2 ? geometry.width / 2 : 0}
+            y1={geometry.width <= 2 ? 0 : geometry.height <= 2 ? geometry.height / 2 : 0}
+            x2={geometry.width <= 2 ? geometry.width / 2 : geometry.width}
+            y2={geometry.width <= 2 ? geometry.height : geometry.height <= 2 ? geometry.height / 2 : geometry.height}
+            stroke={strokeColor}
+            strokeWidth={strokeWidth}
+            strokeDasharray={strokeDasharray}
+            markerEnd={hasArrowEnd ? `url(#arrow-end-${data.id})` : undefined}
+            markerStart={hasArrowStart ? `url(#arrow-start-${data.id})` : undefined}
+          />
+        </svg>
+      )}
+
+      {/* SVG Arc (Yay) */}
+      {isArc && (
+        <svg
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            zIndex: 0,
+            overflow: "visible",
+            pointerEvents: "none",
+            filter: style.boxShadow ? `drop-shadow(${style.boxShadow})` : undefined,
+          }}
+        >
+          <path
+            d="M 50 0 A 50 50 0 0 1 100 50"
+            fill="none"
+            stroke={strokeColor}
+            strokeWidth={strokeWidth}
+            strokeLinecap="round"
+            strokeDasharray={strokeDasharray}
+          />
+        </svg>
+      )}
+
       {/* Metin Paragrafları ve Run'lar */}
       <div
         style={{
           position: "relative",
           zIndex: 1,
+          width: "100%",
           transform: `scale(${scaleX}, ${scaleY})`, // Flip durumunda yazının ters dönmesini engeller
         }}
       >
@@ -178,28 +307,41 @@ export const ShapeNode = memo(({ data }: NodeProps<Node<CanvasNodeAST>>) => {
               marginBottom: `${para.spaceAfter}px`,
               paddingLeft: para.level > 0 ? `${para.level * 18}px` : 0,
               lineHeight: 1.25,
+              width: "100%",
             }}
           >
             {para.bullet && (
-              <span style={{ marginRight: "6px", userSelect: "none" }}>
+              <span
+                style={{
+                  marginRight: "6px",
+                  userSelect: "none",
+                  color: para.runs[0]?.color,
+                  fontFamily: getFontFamilyFallback(para.runs[0]?.fontFamily),
+                }}
+              >
                 {para.bullet}
               </span>
             )}
-            {para.runs.map((run, rIdx) => (
-              <span
-                key={rIdx}
-                style={{
-                  fontFamily: `"${run.fontFamily}", sans-serif`,
-                  fontSize: `${run.fontSize}px`,
-                  color: run.color,
-                  fontWeight: run.bold ? 700 : 400,
-                  fontStyle: run.italic ? "italic" : "normal",
-                  textDecoration: run.underline ? "underline" : "none",
-                }}
-              >
-                {run.text}
-              </span>
-            ))}
+            {para.runs.map((run, rIdx) => {
+              const textDecorations: string[] = [];
+              if (run.underline) textDecorations.push("underline");
+              if (run.strikethrough) textDecorations.push("line-through");
+              return (
+                <span
+                  key={rIdx}
+                  style={{
+                    fontFamily: getFontFamilyFallback(run.fontFamily),
+                    fontSize: `${run.fontSize}px`,
+                    color: run.color,
+                    fontWeight: run.bold ? 700 : 400,
+                    fontStyle: run.italic ? "italic" : "normal",
+                    textDecoration: textDecorations.length > 0 ? textDecorations.join(" ") : "none",
+                  }}
+                >
+                  {run.text}
+                </span>
+              );
+            })}
           </div>
         ))}
       </div>
@@ -283,6 +425,10 @@ export const TableNode = memo(({ data }: NodeProps<Node<CanvasNodeAST>>) => {
                     padding: "4px 8px",
                     verticalAlign: "middle",
                     overflow: "hidden",
+                    fontFamily: getFontFamilyFallback(cell.fontFamily),
+                    fontSize: cell.fontSize ? `${cell.fontSize}px` : "13px",
+                    color: cell.color || "inherit",
+                    fontWeight: cell.bold ? 700 : 400,
                   }}
                 >
                   {cell.text}
@@ -314,24 +460,64 @@ export const AnchorNode = memo(() => {
   );
 });
 
+// --- 6. SLAYT ÇERÇEVESİ (ArtboardNode) ---
+export const ArtboardNode = memo(({ data }: NodeProps<Node<{ width: number; height: number; background: string }>>) => {
+  return (
+    <div
+      style={{
+        width: `${data.width}px`,
+        height: `${data.height}px`,
+        background: data.background,
+        boxShadow: "0 10px 35px rgba(0, 0, 0, 0.4)",
+        borderRadius: "4px",
+        pointerEvents: "none",
+      }}
+    />
+  );
+});
+
 const NODE_TYPES = {
   shapeNode: ShapeNode,
   imageNode: ImageNode,
   tableNode: TableNode,
   anchorNode: AnchorNode,
+  artboardNode: ArtboardNode,
 };
 
-// --- 6. AST -> REACT FLOW DÖNÜŞTÜRÜCÜSÜ ---
+// --- 7. AST -> REACT FLOW DÖNÜŞTÜRÜCÜSÜ ---
 function mapSlideToReactFlow(
-  slide: LiveCanvasDeckAST["slides"][number]
+  slide: LiveCanvasDeckAST["slides"][number],
+  presentation?: LiveCanvasDeckAST["presentation"]
 ): { rfNodes: Node<CanvasNodeAST>[]; rfEdges: Edge[] } {
-  const rfNodes: Node<CanvasNodeAST>[] = slide.nodes.map((node) => ({
-    id: node.id,
-    type: node.type,
-    position: { x: node.geometry.x, y: node.geometry.y },
-    zIndex: node.zIndex,
-    data: node,
-  }));
+  const rfNodes: Node<CanvasNodeAST>[] = [];
+
+  if (presentation) {
+    rfNodes.push({
+      id: `slide-artboard-${slide.id}`,
+      type: "artboardNode",
+      position: { x: 0, y: 0 },
+      selectable: false,
+      draggable: false,
+      focusable: false,
+      deletable: false,
+      zIndex: -1000,
+      data: {
+        width: presentation.slideWidth,
+        height: presentation.slideHeight,
+        background: slide.background.color || "#FFFFFF",
+      } as unknown as CanvasNodeAST,
+    });
+  }
+
+  for (const node of slide.nodes) {
+    rfNodes.push({
+      id: node.id,
+      type: node.type,
+      position: { x: node.geometry.x, y: node.geometry.y },
+      zIndex: node.zIndex,
+      data: node,
+    });
+  }
 
   const rfEdges: Edge[] = slide.edges.map((edge: CanvasEdgeAST) => {
     const hasStartArrow = edge.style.arrowStart && edge.style.arrowStart !== "none";
@@ -367,7 +553,7 @@ function mapSlideToReactFlow(
   return { rfNodes, rfEdges };
 }
 
-// --- 7. ANA SLAYT SAHNESİ BİLEŞENİ ---
+// --- 8. ANA SLAYT SAHNESİ BİLEŞENİ ---
 interface LiveCanvasViewerProps {
   deckAst: LiveCanvasDeckAST;
 }
@@ -377,18 +563,18 @@ export const LiveCanvasViewer: React.FC<LiveCanvasViewerProps> = ({ deckAst }) =
   const currentSlide = deckAst.slides[activeSlideIdx];
 
   const initialGraph = useMemo(
-    () => mapSlideToReactFlow(currentSlide),
-    [currentSlide]
+    () => mapSlideToReactFlow(currentSlide, deckAst.presentation),
+    [currentSlide, deckAst.presentation]
   );
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialGraph.rfNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialGraph.rfEdges);
 
   useEffect(() => {
-    const { rfNodes, rfEdges } = mapSlideToReactFlow(currentSlide);
+    const { rfNodes, rfEdges } = mapSlideToReactFlow(currentSlide, deckAst.presentation);
     setNodes(rfNodes);
     setEdges(rfEdges);
-  }, [currentSlide, setNodes, setEdges]);
+  }, [currentSlide, deckAst.presentation, setNodes, setEdges]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", background: "#0F172A" }}>
@@ -452,9 +638,9 @@ export const LiveCanvasViewer: React.FC<LiveCanvasViewerProps> = ({ deckAst }) =
           fitView
           minZoom={0.2}
           maxZoom={2.5}
-          style={{ background: currentSlide.background.color || "#FFFFFF" }}
+          style={{ background: "#0F172A" }}
         >
-          <Background color="#94A3B8" gap={24} size={1} />
+          <Background color="#334155" gap={24} size={1} />
           <Controls />
         </ReactFlow>
       </div>

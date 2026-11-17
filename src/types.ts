@@ -22,7 +22,7 @@ export interface SlideAST {
   edges: CanvasEdgeAST[];
 }
 
-export type CanvasNodeType = "shapeNode" | "imageNode" | "tableNode" | "anchorNode";
+export type CanvasNodeType = "shapeNode" | "imageNode" | "tableNode" | "anchorNode" | "artboardNode";
 
 export interface NodeGeometryAST {
   x: number;
@@ -49,6 +49,7 @@ export interface TextRunAST {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strikethrough?: boolean;
 }
 
 export interface TextParagraphAST {
@@ -74,6 +75,9 @@ export interface ShapeStyleAST {
     bottom: number;
     left: number;
   };
+  boxShadow?: string;
+  arrowStart?: string;
+  arrowEnd?: string;
 }
 
 export interface TableDataAST {
@@ -83,6 +87,10 @@ export interface TableDataAST {
     cells: {
       text: string;
       backgroundColor: string;
+      fontFamily?: string;
+      fontSize?: number;
+      color?: string;
+      bold?: boolean;
     }[];
   }[];
 }
@@ -99,6 +107,12 @@ export interface CanvasNodeAST extends Record<string, unknown> {
   imageDataUri?: string;
   table?: TableDataAST;
   ports: PortAST[];
+  arrowStart?: string;
+  arrowEnd?: string;
+  arcParams?: {
+    startAngle: number;
+    endAngle: number;
+  };
 }
 
 export interface CanvasEdgeAST {
