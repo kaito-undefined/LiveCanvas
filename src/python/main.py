@@ -3,7 +3,7 @@
 """
 LiveCanvas Deterministic OpenXML (PresentationML) to Graph AST Compiler
 Requires: pip install python-pptx lxml
-Usage:    python src/python/main.py input_deck.pptx output_ast.json
+Usage:    python src/python/main.py [input_deck.pptx output_ast.json]
 """
 
 import sys
@@ -914,22 +914,41 @@ class PresentationMLCompiler:
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("Kullanım: python compiler.py <girdi.pptx> <cikti_ast.json>")
+    if len(sys.argv) not in (1, 3):
+        print(
+            "Kullanım: python src/python/main.py "
+            "[<girdi.pptx> <cikti_ast.json>]"
+        )
         sys.exit(1)
 
-    input_pptx = Path(sys.argv[1])
-    output_json = Path(sys.argv[2])
+    if len(sys.argv) == 3:
+        input_files = [(Path(sys.argv[1]), Path(sys.argv[2]))]
+    else:
+        input_dir = Path("data/input")
+        input_files = [
+            (input_pptx, Path("data/output") / f"{input_pptx.stem}.json")
+            for input_pptx in sorted(input_dir.glob("*.pptx"))
+            if not input_pptx.name.startswith("~$")
+        ]
+        if not input_files:
+            print(f"Hata: '{input_dir}' içinde .pptx dosyası bulunamadı.")
+            sys.exit(1)
 
-    if not input_pptx.exists():
-        print(f"Hata: '{input_pptx}' dosyası bulunamadı.")
-        sys.exit(1)
+    for input_pptx, output_json in input_files:
+        if not input_pptx.exists():
+            print(f"Hata: '{input_pptx}' dosyası bulunamadı.")
+            sys.exit(1)
 
-    compiler = PresentationMLCompiler(str(input_pptx))
-    ast_data = compiler.compile()
-
-    output_json.write_text(json.dumps(ast_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Tamamlandı: {len(ast_data['slides'])} slayt başarıyla '{output_json}' dosyasına derlendi.")
+        compiler = PresentationMLCompiler(str(input_pptx))
+        ast_data = compiler.compile()
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(
+            json.dumps(ast_data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(
+            f"Tamamlandı: {len(ast_data['slides'])} slayt başarıyla "
+            f"'{output_json}' dosyasına derlendi."
+        )
 
 
 if __name__ == "__main__":

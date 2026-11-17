@@ -1,10 +1,16 @@
 import { useState } from "react";
 import { LiveCanvasViewer } from "./LiveCanvasViewer";
 import type { LiveCanvasDeckAST } from "./types";
-import exampleAst from "../data/output/example.json";
+
+const deckAsts = Object.values(
+  import.meta.glob("../data/output/*.json", {
+    eager: true,
+    import: "default",
+  }),
+) as LiveCanvasDeckAST[];
 
 export function App() {
-  const [deckAst] = useState<LiveCanvasDeckAST>(exampleAst as LiveCanvasDeckAST);
+  const [deckAst] = useState<LiveCanvasDeckAST>(deckAsts[3]); //for devolopment, remove later
 
   return <LiveCanvasViewer deckAst={deckAst} />;
 }

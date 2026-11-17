@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "convert": "python src/python/main.py data/input/example.pptx data/output/example.json",
+    "convert": "python src/python/main.py",
+    "install-python": "python -m pip install python-pptx lxml",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
